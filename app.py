@@ -5,7 +5,8 @@ from bs4 import BeautifulSoup
 import re
 import json
 import time
-
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, abort
 
 # --------------------------------------
 # معلومات حالة المباراة
@@ -93,6 +94,37 @@ def change_logo_size(url):
     if "teams/64/" in url:
         return url.replace("teams/64/", "teams/128/")
     return url
+# ------------------- تنسيق وقت البداية الجديد -------------------
+
+def format_match_start_time(raw_time_str):
+    """يضيف 8 ساعات ويحول وقت البداية إلى صيغة 24 ساعة."""
+    if not raw_time_str:
+        return None
+    
+    try:
+        # استبدال النصوص العربية بما يقابلها بالإنجليزية في التنسيق (لتوافق Python)
+        time_str_en = raw_time_str.replace("مساءً", "PM").replace("صباحاً", "AM")
+        
+        # محاولة تحليل التاريخ والوقت
+        if "PM" in time_str_en or "AM" in time_str_en:
+            # تنسيق 12 ساعة مع التاريخ: YYYY-MM-DD HH:MM AM/PM
+            dt = datetime.strptime(time_str_en, "%Y-%m-%d %I:%M %p")
+        else:
+            # تنسيق 24 ساعة مع التاريخ: YYYY-MM-DD HH:MM
+            dt = datetime.strptime(raw_time_str, "%Y-%m-%d %H:%M")
+
+        dt += timedelta(hours=8)
+        return dt.strftime("%Y-%m-%d %H:%M") # إرجاع بصيغة 24 ساعة
+    except Exception:
+        return raw_time_str
+
+def extract_start_time_raw(soup):
+    """يستخلص وقت البداية الخام من صفحة المباراة."""
+    time_div = soup.select_one(".time-title")
+    if time_div:
+        # مثال: "2025-08-05 03:30 مساءً"
+        return time_div.get_text(strip=True)
+    return None
 
 # ------------------- استخراج الإحصائيات -------------------
 
@@ -271,18 +303,17 @@ def extract_meeting_info(soup):
 
 # ------------------- استخراج معلومات المباراة -------------------
 
-from datetime import datetime, timedelta
-
-# دالة تنسيق الوقت: تضيف +8 ساعات وترجعه بصيغة 24h
+# دالة format_match_time الأصلية (تم الاحتفاظ بها لعدم التعديل عليها، لكنها لم تعد تستخدم في extract_info للمباريات غير الحية)
 def format_match_time(raw_time):
     try:
+        # هذه الدالة مخصصة لـ "وقت الشوط الحالي" فقط، وليس وقت بداية المباراة
         dt = datetime.strptime(raw_time, "%Y-%m-%d %H:%M")
         dt += timedelta(hours=8)
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return raw_time
 
-# ------------------- استخراج معلومات المباراة -------------------
+# ------------------- استخراج معلومات المباراة (محدثة) -------------------
 def extract_info(soup, teams_info):
     info = teams_info.copy()
 
@@ -294,11 +325,12 @@ def extract_info(soup, teams_info):
     tag_time = soup.find("input", {"id": "match_time"})
     time_value = tag_time["value"] if tag_time and tag_time.has_attr("value") else None
 
-    raw_time = compute_time_expr(status_value, time_value)
-    match_time = format_match_time(raw_time)
+    # الوقت الحالي في المباراة (مثل 45+2)
+    current_match_time = compute_time_expr(status_value, time_value)
 
     info.update({
-        "Time": match_time,
+        "StartTime": teams_info.get("StartTime"), # وقت البداية المنسق الجديد
+        "CurrentTime": current_match_time,       # وقت الشوط الحالي
         "Status": status_text,
         "Is live": is_live,
         "HomeScore": None,
@@ -309,7 +341,9 @@ def extract_info(soup, teams_info):
         "AwayPen": None,
         "Winner": ""
     })
-
+    
+    # تم حذف حقل "Time" واستبداله بـ "StartTime" و "CurrentTime"
+    
     meeting_info = extract_meeting_info(soup)
     info.update(meeting_info)
 
@@ -400,7 +434,7 @@ def build_match_info(html_content, teams_info):
         "events": list(reversed(output))
     }
 
-# ------------------- Main API Function -------------------
+# ------------------- Main API Function (محدثة) -------------------
 
 def get_match_data(match_id: str):
     base_url = "https://www.ysscores.com"
@@ -409,7 +443,7 @@ def get_match_data(match_id: str):
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    # Step 1: Get team names and logos
+    # Step 1: Get team names, logos, and start time
     try:
         page_resp = requests.get(match_page_url, headers=headers, timeout=10)
         page_resp.raise_for_status()
@@ -419,7 +453,8 @@ def get_match_data(match_id: str):
     soup_page = BeautifulSoup(page_resp.text, "html.parser")
     teams = soup_page.select(".team-item")
     if len(teams) < 2:
-        raise Exception("Could not find team info on match page")
+        # قد تكون الصفحة غير صالحة، نحاول استخلاص وقت البداية على الأقل
+        pass 
 
     def get_team_data(el):
         name_el = el.find("h3")
@@ -428,14 +463,20 @@ def get_match_data(match_id: str):
         logo = change_logo_size(logo)
         return name, logo
 
-    home_name, home_logo = get_team_data(teams[0])
-    away_name, away_logo = get_team_data(teams[1])
+    # استخلاص معلومات الفريق
+    home_name, home_logo = get_team_data(teams[0]) if len(teams) >= 1 else ("", "")
+    away_name, away_logo = get_team_data(teams[1]) if len(teams) >= 2 else ("", "")
+
+    # استخلاص وتنسيق وقت البداية
+    raw_start_time = extract_start_time_raw(soup_page)
+    formatted_start_time = format_match_start_time(raw_start_time)
 
     teams_info = {
         "HomeTeam": home_name,
         "HomeImgLink": home_logo,
         "AwayTeam": away_name,
-        "AwayImgLink": away_logo
+        "AwayImgLink": away_logo,
+        "StartTime": formatted_start_time # إضافة وقت البداية المنسق
     }
 
     # Step 2: Get live match data
@@ -453,11 +494,6 @@ def get_match_data(match_id: str):
 
 # ------------------- FastAPI Endpoint -------------------
 
-from flask import Flask, jsonify, abort
-import requests
-from bs4 import BeautifulSoup
-# import all your helper functions from the FastAPI code above
-
 app = Flask(__name__)
 
 @app.route("/match/<match_id>", methods=["GET"])
@@ -465,11 +501,10 @@ def get_match(match_id):
     if not match_id.isdigit():
         abort(400, description="Invalid match ID. Must be numeric.")
     try:
-        data = get_match_data(match_id)  # same function you already wrote
+        data = get_match_data(match_id)  # نفس الدالة التي كتبتها
         return jsonify(data)
     except Exception as e:
         abort(500, description=str(e))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
-
