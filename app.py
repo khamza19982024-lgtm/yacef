@@ -5,8 +5,7 @@ from bs4 import BeautifulSoup
 import re
 import json
 import time
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, abort
+
 
 # --------------------------------------
 # معلومات حالة المباراة
@@ -94,37 +93,6 @@ def change_logo_size(url):
     if "teams/64/" in url:
         return url.replace("teams/64/", "teams/128/")
     return url
-# ------------------- تنسيق وقت البداية الجديد -------------------
-
-def format_match_start_time(raw_time_str):
-    """يضيف 8 ساعات ويحول وقت البداية إلى صيغة 24 ساعة."""
-    if not raw_time_str:
-        return None
-    
-    try:
-        # استبدال النصوص العربية بما يقابلها بالإنجليزية في التنسيق (لتوافق Python)
-        time_str_en = raw_time_str.replace("مساءً", "PM").replace("صباحاً", "AM")
-        
-        # محاولة تحليل التاريخ والوقت
-        if "PM" in time_str_en or "AM" in time_str_en:
-            # تنسيق 12 ساعة مع التاريخ: YYYY-MM-DD HH:MM AM/PM
-            dt = datetime.strptime(time_str_en, "%Y-%m-%d %I:%M %p")
-        else:
-            # تنسيق 24 ساعة مع التاريخ: YYYY-MM-DD HH:MM
-            dt = datetime.strptime(raw_time_str, "%Y-%m-%d %H:%M")
-
-        dt += timedelta(hours=8)
-        return dt.strftime("%Y-%m-%d %H:%M") # إرجاع بصيغة 24 ساعة
-    except Exception:
-        return raw_time_str
-
-def extract_start_time_raw(soup):
-    """يستخلص وقت البداية الخام من صفحة المباراة."""
-    time_div = soup.select_one(".time-title")
-    if time_div:
-        # مثال: "2025-08-05 03:30 مساءً"
-        return time_div.get_text(strip=True)
-    return None
 
 # ------------------- استخراج الإحصائيات -------------------
 
@@ -197,7 +165,7 @@ def extract_match_events(soup, home_team_class="for-team-a", away_team_class="fo
             continue
 
         time_element = event_item.find('div', class_='time')
-        event_data['time'] = time_element.get_text(strip=True).replace('’', '') if time_element else None
+        event_data['time'] = time_element.get_text(strip=True).replace("'", '') if time_element else None
 
         # Only add if we have essential data
         if event_data.get('time') or event_data.get('type'):
@@ -252,8 +220,8 @@ def extract_time_stops(soup):
         if not title_el:
             continue
         text = title_el.get_text(strip=True)
-        if "’" in text:
-            time_part, name_part = text.split("’", 1)
+        if "'" in text:
+            time_part, name_part = text.split("'", 1)
             stop_event = {"type": "stop", "time": time_part.strip(), "name": name_part.strip()}
             time_stops.append(stop_event)
     return time_stops
@@ -265,7 +233,7 @@ def extract_match_stops(soup):
         if not title_el:
             continue
         text = title_el.get_text(strip=True)
-        if "’" in text:
+        if "'" in text:
             continue
         name = text
         if name not in STOP_ORDER:
@@ -282,6 +250,44 @@ def extract_match_stops(soup):
 
 # ------------------- معلومات اللقاء -------------------
 
+def adjust_match_time(time_str):
+    """
+    تحويل وقت المباراة من صيغة 12 ساعة إلى 24 ساعة مع إضافة 8 ساعات
+    مثال: "06:00 صباحاً" -> "14:00"
+    """
+    try:
+        # إزالة المسافات الزائدة
+        time_str = time_str.strip()
+        
+        # استخراج الوقت والفترة (صباحاً/مساءً)
+        time_part = time_str.split()[0]  # "06:00"
+        period = time_str.split()[1] if len(time_str.split()) > 1 else ""  # "صباحاً" أو "مساءً"
+        
+        # تقسيم الساعات والدقائق
+        hours, minutes = map(int, time_part.split(":"))
+        
+        # تحويل إلى صيغة 24 ساعة
+        if "مساءً" in period or "مساء" in period:
+            if hours != 12:
+                hours += 12
+        elif "صباحاً" in period or "صباحا" in period:
+            if hours == 12:
+                hours = 0
+        
+        # إضافة 8 ساعات
+        hours += 8
+        
+        # معالجة تجاوز 24 ساعة
+        if hours >= 24:
+            hours -= 24
+        
+        # إرجاع الوقت بصيغة 24 ساعة
+        return f"{hours:02d}:{minutes:02d}"
+    
+    except Exception as e:
+        # في حالة فشل التحويل، إرجاع القيمة الأصلية
+        return time_str
+
 def extract_meeting_info(soup):
     match_info = {}
     blocks = soup.find_all("div", class_="match-block-item pt-2")
@@ -297,23 +303,29 @@ def extract_meeting_info(soup):
                         a.unwrap()
                     title = title_div.get_text(strip=True)
                     content = content_div.get_text(strip=True)
+                    
+                    # إذا كان الحقل هو "وقت المباراة"، أضف 8 ساعات وحوّل إلى صيغة 24 ساعة
+                    if title == "وقت المباراة":
+                        content = adjust_match_time(content)
+                    
                     match_info[title] = content
             break
     return match_info
 
 # ------------------- استخراج معلومات المباراة -------------------
 
-# دالة format_match_time الأصلية (تم الاحتفاظ بها لعدم التعديل عليها، لكنها لم تعد تستخدم في extract_info للمباريات غير الحية)
+from datetime import datetime, timedelta
+
+# دالة تنسيق الوقت: تضيف +8 ساعات وترجعه بصيغة 24h
 def format_match_time(raw_time):
     try:
-        # هذه الدالة مخصصة لـ "وقت الشوط الحالي" فقط، وليس وقت بداية المباراة
         dt = datetime.strptime(raw_time, "%Y-%m-%d %H:%M")
         dt += timedelta(hours=8)
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return raw_time
 
-# ------------------- استخراج معلومات المباراة (محدثة) -------------------
+# ------------------- استخراج معلومات المباراة -------------------
 def extract_info(soup, teams_info):
     info = teams_info.copy()
 
@@ -325,12 +337,11 @@ def extract_info(soup, teams_info):
     tag_time = soup.find("input", {"id": "match_time"})
     time_value = tag_time["value"] if tag_time and tag_time.has_attr("value") else None
 
-    # الوقت الحالي في المباراة (مثل 45+2)
-    current_match_time = compute_time_expr(status_value, time_value)
+    raw_time = compute_time_expr(status_value, time_value)
+    match_time = format_match_time(raw_time)
 
     info.update({
-        "StartTime": teams_info.get("StartTime"), # وقت البداية المنسق الجديد
-        "CurrentTime": current_match_time,       # وقت الشوط الحالي
+        "Time": match_time,
         "Status": status_text,
         "Is live": is_live,
         "HomeScore": None,
@@ -341,9 +352,7 @@ def extract_info(soup, teams_info):
         "AwayPen": None,
         "Winner": ""
     })
-    
-    # تم حذف حقل "Time" واستبداله بـ "StartTime" و "CurrentTime"
-    
+
     meeting_info = extract_meeting_info(soup)
     info.update(meeting_info)
 
@@ -434,7 +443,7 @@ def build_match_info(html_content, teams_info):
         "events": list(reversed(output))
     }
 
-# ------------------- Main API Function (محدثة) -------------------
+# ------------------- Main API Function -------------------
 
 def get_match_data(match_id: str):
     base_url = "https://www.ysscores.com"
@@ -443,7 +452,7 @@ def get_match_data(match_id: str):
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    # Step 1: Get team names, logos, and start time
+    # Step 1: Get team names and logos
     try:
         page_resp = requests.get(match_page_url, headers=headers, timeout=10)
         page_resp.raise_for_status()
@@ -453,8 +462,7 @@ def get_match_data(match_id: str):
     soup_page = BeautifulSoup(page_resp.text, "html.parser")
     teams = soup_page.select(".team-item")
     if len(teams) < 2:
-        # قد تكون الصفحة غير صالحة، نحاول استخلاص وقت البداية على الأقل
-        pass 
+        raise Exception("Could not find team info on match page")
 
     def get_team_data(el):
         name_el = el.find("h3")
@@ -463,20 +471,14 @@ def get_match_data(match_id: str):
         logo = change_logo_size(logo)
         return name, logo
 
-    # استخلاص معلومات الفريق
-    home_name, home_logo = get_team_data(teams[0]) if len(teams) >= 1 else ("", "")
-    away_name, away_logo = get_team_data(teams[1]) if len(teams) >= 2 else ("", "")
-
-    # استخلاص وتنسيق وقت البداية
-    raw_start_time = extract_start_time_raw(soup_page)
-    formatted_start_time = format_match_start_time(raw_start_time)
+    home_name, home_logo = get_team_data(teams[0])
+    away_name, away_logo = get_team_data(teams[1])
 
     teams_info = {
         "HomeTeam": home_name,
         "HomeImgLink": home_logo,
         "AwayTeam": away_name,
-        "AwayImgLink": away_logo,
-        "StartTime": formatted_start_time # إضافة وقت البداية المنسق
+        "AwayImgLink": away_logo
     }
 
     # Step 2: Get live match data
@@ -494,6 +496,11 @@ def get_match_data(match_id: str):
 
 # ------------------- FastAPI Endpoint -------------------
 
+from flask import Flask, jsonify, abort
+import requests
+from bs4 import BeautifulSoup
+# import all your helper functions from the FastAPI code above
+
 app = Flask(__name__)
 
 @app.route("/match/<match_id>", methods=["GET"])
@@ -501,7 +508,7 @@ def get_match(match_id):
     if not match_id.isdigit():
         abort(400, description="Invalid match ID. Must be numeric.")
     try:
-        data = get_match_data(match_id)  # نفس الدالة التي كتبتها
+        data = get_match_data(match_id)  # same function you already wrote
         return jsonify(data)
     except Exception as e:
         abort(500, description=str(e))
