@@ -271,6 +271,18 @@ def extract_meeting_info(soup):
 
 # ------------------- استخراج معلومات المباراة -------------------
 
+from datetime import datetime, timedelta
+
+# دالة تنسيق الوقت: تضيف +8 ساعات وترجعه بصيغة 24h
+def format_match_time(raw_time):
+    try:
+        dt = datetime.strptime(raw_time, "%Y-%m-%d %H:%M")
+        dt += timedelta(hours=8)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return raw_time
+
+# ------------------- استخراج معلومات المباراة -------------------
 def extract_info(soup, teams_info):
     info = teams_info.copy()
 
@@ -281,7 +293,9 @@ def extract_info(soup, teams_info):
 
     tag_time = soup.find("input", {"id": "match_time"})
     time_value = tag_time["value"] if tag_time and tag_time.has_attr("value") else None
-    match_time = compute_time_expr(status_value, time_value)
+
+    raw_time = compute_time_expr(status_value, time_value)
+    match_time = format_match_time(raw_time)
 
     info.update({
         "Time": match_time,
@@ -337,6 +351,7 @@ def extract_info(soup, teams_info):
         info["Winner"] = winner
 
     return info
+
 
 # ------------------- الدمج والترتيب -------------------
 
@@ -457,3 +472,4 @@ def get_match(match_id):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
+
