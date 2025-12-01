@@ -54,6 +54,32 @@ def parse_arabic_date(date_str: str) -> Optional[datetime]:
     
     return None
 
+def adjust_match_time(time_str):
+    """تحويل وقت المباراة من صيغة 12 ساعة إلى 24 ساعة مع إضافة 9 ساعات"""
+    try:
+        time_str = time_str.strip()
+        time_part = time_str.split()[0]
+        period = time_str.split()[1] if len(time_str.split()) > 1 else ""
+        
+        hours, minutes = map(int, time_part.split(":"))
+        
+        if "مساءً" in period or "مساء" in period:
+            if hours != 12:
+                hours += 12
+        elif "صباحاً" in period or "صباحا" in period:
+            if hours == 12:
+                hours = 0
+        
+        hours += 9
+        
+        if hours >= 24:
+            hours -= 24
+        
+        return f"{hours:02d}:{minutes:02d}"
+    
+    except Exception:
+        return time_str
+
 def extract_match_info(match_elem, date_str: str, round_name: str) -> Optional[Match]:
     """Extract match information from HTML element"""
     try:
@@ -126,7 +152,7 @@ def extract_match_info(match_elem, date_str: str, round_name: str) -> Optional[M
             else:
                 match_date_elem = result_wrap.find('b', class_='match-date')
                 if match_date_elem:
-                    match_time = match_date_elem.text.strip()
+                    match_time = adjust_match_time(match_date_elem.text.strip())
                     status = "upcoming"
         
         return Match(
@@ -594,32 +620,6 @@ def extract_match_stops(soup):
 
 # ------------------- معلومات اللقاء -------------------
 
-def adjust_match_time(time_str):
-    """تحويل وقت المباراة من صيغة 12 ساعة إلى 24 ساعة مع إضافة 8 ساعات"""
-    try:
-        time_str = time_str.strip()
-        time_part = time_str.split()[0]
-        period = time_str.split()[1] if len(time_str.split()) > 1 else ""
-        
-        hours, minutes = map(int, time_part.split(":"))
-        
-        if "مساءً" in period or "مساء" in period:
-            if hours != 12:
-                hours += 12
-        elif "صباحاً" in period or "صباحا" in period:
-            if hours == 12:
-                hours = 0
-        
-        hours += 8
-        
-        if hours >= 24:
-            hours -= 24
-        
-        return f"{hours:02d}:{minutes:02d}"
-    
-    except Exception:
-        return time_str
-
 def extract_meeting_info(soup):
     match_info = {}
     blocks = soup.find_all("div", class_="match-block-item pt-2")
@@ -646,10 +646,10 @@ def extract_meeting_info(soup):
 # ------------------- استخراج معلومات المباراة -------------------
 
 def format_match_time(raw_time):
-    """دالة تنسيق الوقت: تضيف +8 ساعات وترجعه بصيغة 24h"""
+    """دالة تنسيق الوقت: تضيف +9 ساعات وترجعه بصيغة 24h"""
     try:
         dt = datetime.strptime(raw_time, "%Y-%m-%d %H:%M")
-        dt += timedelta(hours=8)
+        dt += timedelta(hours=9)
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return raw_time
@@ -866,7 +866,6 @@ async def get_only_stats(match_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
 
-
 # ---------------------------------------------
 # NEW ENDPOINT: Return only INFO
 # ---------------------------------------------
@@ -886,6 +885,7 @@ async def get_only_info(match_id: str):
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching info: {str(e)}")
+
 @app.get("/matches/{match_id}/events")
 async def get_match_events(match_id: str):
     """
@@ -906,9 +906,6 @@ async def get_match_events(match_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching match events: {str(e)}")
 
-
-
 import uvicorn
 if __name__ == "__main__":
-    
     uvicorn.run(app, host="0.0.0.0", port=8000)
