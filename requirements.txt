@@ -6,4 +6,10 @@ flask
 requests
 beautifulsoup4
 gunicorn
+fastapi
+uvicorn[standard]
+gunicorn
+beautifulsoup4
+requests
+pydantic
 
