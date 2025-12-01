@@ -823,7 +823,7 @@ def get_match_data(match_id: str):
 
 # ------------------- Stats API Endpoint -------------------
 
-@app.get("/stats/{match_id}")
+@app.get("/match/{match_id}")
 async def get_match_stats(match_id: str):
     """
     Get detailed match statistics, events, and information
@@ -846,8 +846,69 @@ async def get_match_stats(match_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching match stats: {str(e)}")
 
+# ---------------------------------------------
+# NEW ENDPOINT: Return only STATS
+# ---------------------------------------------
+@app.get("/match/{match_id}/stats")
+async def get_only_stats(match_id: str):
+    try:
+        match_data = get_match_data(match_id)
+        return {
+            "success": True,
+            "match_id": match_id,
+            "data": {
+                "stats": match_data.get("stats", {})
+            },
+            "scraped_at": datetime.now().isoformat()
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+
+
+# ---------------------------------------------
+# NEW ENDPOINT: Return only INFO
+# ---------------------------------------------
+@app.get("/match/{match_id}/info")
+async def get_only_info(match_id: str):
+    try:
+        match_data = get_match_data(match_id)
+        return {
+            "success": True,
+            "match_id": match_id,
+            "data": {
+                "info": match_data.get("Info", {})
+            },
+            "scraped_at": datetime.now().isoformat()
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching info: {str(e)}")
+@app.get("/match/{match_id}/events")
+async def get_match_events(match_id: str):
+    """
+    Return only match events
+    """
+    try:
+        match_data = get_match_data(match_id)
+        return {
+            "success": True,
+            "match_id": match_id,
+            "data": {
+                "events": match_data.get("events", [])
+            },
+            "scraped_at": datetime.now().isoformat()
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching match events: {str(e)}")
+
+
+
 import uvicorn
 if __name__ == "__main__":
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
