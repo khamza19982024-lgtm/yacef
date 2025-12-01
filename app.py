@@ -823,7 +823,7 @@ def get_match_data(match_id: str):
 
 # ------------------- Stats API Endpoint -------------------
 
-@app.get("/match/{match_id}")
+@app.get("/matches/{match_id}")
 async def get_match_stats(match_id: str):
     """
     Get detailed match statistics, events, and information
@@ -849,7 +849,7 @@ async def get_match_stats(match_id: str):
 # ---------------------------------------------
 # NEW ENDPOINT: Return only STATS
 # ---------------------------------------------
-@app.get("/match/{match_id}/stats")
+@app.get("/matches/{match_id}/stats")
 async def get_only_stats(match_id: str):
     try:
         match_data = get_match_data(match_id)
@@ -870,7 +870,7 @@ async def get_only_stats(match_id: str):
 # ---------------------------------------------
 # NEW ENDPOINT: Return only INFO
 # ---------------------------------------------
-@app.get("/match/{match_id}/info")
+@app.get("/matches/{match_id}/info")
 async def get_only_info(match_id: str):
     try:
         match_data = get_match_data(match_id)
@@ -886,7 +886,7 @@ async def get_only_info(match_id: str):
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching info: {str(e)}")
-@app.get("/match/{match_id}/events")
+@app.get("/matches/{match_id}/events")
 async def get_match_events(match_id: str):
     """
     Return only match events
