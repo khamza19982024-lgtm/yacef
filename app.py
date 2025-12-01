@@ -1,11 +1,356 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-import requests
+from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
+import requests
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
 import re
-import json
-import time
+from pydantic import BaseModel
 
+app = FastAPI(title="Algerian League Scraper API", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class Match(BaseModel):
+    match_id: str
+    home_team: str
+    away_team: str
+    home_logo: str
+    away_logo: str
+    home_score: Optional[str] = None
+    away_score: Optional[str] = None
+    status: str  # "upcoming", "live", "finished", "postponed"
+    match_time: Optional[str] = None
+    date: str
+    round: str
+    match_url: str
+    live_minute: Optional[str] = None
+    live_status: Optional[str] = None  # "الشوط الأول", "الشوط الثاني", etc.
+    is_live: bool = False
+
+class MatchesResponse(BaseModel):
+    total_matches: int
+    matches: List[Match]
+    scraped_at: str
+    date_range: str
+
+def parse_arabic_date(date_str: str) -> Optional[datetime]:
+    """Parse Arabic date format to datetime"""
+    try:
+        # Extract date in format DD-MM-YYYY
+        date_match = re.search(r'(\d{2})-(\d{2})-(\d{4})', date_str)
+        if date_match:
+            day, month, year = date_match.groups()
+            return datetime(int(year), int(month), int(day))
+    except Exception as e:
+        print(f"Date parsing error: {e}")
+    
+    return None
+
+def extract_match_info(match_elem, date_str: str, round_name: str) -> Optional[Match]:
+    """Extract match information from HTML element"""
+    try:
+        # Extract match URL and ID
+        match_url = match_elem.get('href', '')
+        match_id = match_elem.get('match_id', '')
+        
+        # Extract team names
+        home_name = match_elem.get('home_name', '')
+        away_name = match_elem.get('away_name', '')
+        
+        # Extract team logos
+        home_logo = match_elem.get('home_image', '')
+        away_logo = match_elem.get('away_image', '')
+        
+        # Check if match is live
+        is_live = 'live-match' in match_elem.get('class', [])
+        
+        # Initialize scores and status
+        home_score = None
+        away_score = None
+        status = "upcoming"
+        match_time = None
+        live_minute = None
+        live_status = None
+        
+        # Find result wrap for all match types
+        result_wrap = match_elem.find('div', class_='result-wrap')
+        
+        if result_wrap:
+            # Check for LIVE match - has active-match-progress div
+            active_progress = match_elem.find('div', class_='active-match-progress')
+            if active_progress or is_live:
+                status = "live"
+                
+                # Extract live status (الشوط الأول, الشوط الثاني, etc.)
+                live_status_elem = active_progress.find('span', class_='result-status-text') if active_progress else None
+                if live_status_elem:
+                    live_status = live_status_elem.text.strip()
+                
+                # Extract live minute
+                minute_elem = active_progress.find('div', class_='number') if active_progress else None
+                if minute_elem:
+                    live_minute = minute_elem.text.strip()
+                
+                # Extract live scores from team result divs
+                first_team_div = match_elem.find('div', class_='first-team')
+                second_team_div = match_elem.find('div', class_='second-team')
+                
+                if first_team_div:
+                    score_elem = first_team_div.find('div', class_='first-team-result')
+                    if score_elem:
+                        home_score = score_elem.text.strip()
+                
+                if second_team_div:
+                    score_elem = second_team_div.find('div', class_='second-team-result')
+                    if score_elem:
+                        away_score = score_elem.text.strip()
+            
+            # Check for FINISHED match - has span with scores
+            elif result_wrap.find('span', class_='first-team-result'):
+                status = "finished"
+                first_score = result_wrap.find('span', class_='first-team-result')
+                second_score = result_wrap.find('span', class_='second-team-result')
+                if first_score and second_score:
+                    home_score = first_score.text.strip()
+                    away_score = second_score.text.strip()
+            
+            # Check for UPCOMING match (has time)
+            else:
+                match_date_elem = result_wrap.find('b', class_='match-date')
+                if match_date_elem:
+                    match_time = match_date_elem.text.strip()
+                    status = "upcoming"
+        
+        return Match(
+            match_id=match_id,
+            home_team=home_name,
+            away_team=away_name,
+            home_logo=home_logo,
+            away_logo=away_logo,
+            home_score=home_score,
+            away_score=away_score,
+            status=status,
+            match_time=match_time,
+            date=date_str,
+            round=round_name,
+            match_url=match_url if match_url.startswith('http') else f"https://www.ysscores.com{match_url}",
+            live_minute=live_minute,
+            live_status=live_status,
+            is_live=is_live or status == "live"
+        )
+    
+    except Exception as e:
+        print(f"Error extracting match info: {e}")
+        return None
+
+def scrape_matches(html_content: str) -> List[Match]:
+    """Scrape matches from HTML content"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    matches = []
+    
+    # Find the main match list container
+    match_list_container = soup.find('div', id='match_list_conf')
+    
+    if not match_list_container:
+        print("Could not find match_list_conf container")
+        return matches
+    
+    # Find all sections (upcoming, live, finished, postponed)
+    all_wrappers = match_list_container.find_all('div', class_='matches-wrapper', recursive=False)
+    
+    for wrapper in all_wrappers:
+        # Get section title
+        section_title_elem = wrapper.find('h3', class_='matches-top-title')
+        section_type = section_title_elem.text.strip() if section_title_elem else "unknown"
+        
+        # Find the content div (coming_match_load, match_block_list, end_match_load, postponed_match_load)
+        content_divs = wrapper.find_all(['div'], recursive=False)
+        
+        for content_div in content_divs:
+            # Skip if it's just the title div
+            if content_div.find('h3', class_='matches-top-title'):
+                continue
+            
+            # Now find all children that are either week titles or match links
+            children = content_div.find_all(recursive=False)
+            
+            current_round = ""
+            current_date = ""
+            
+            for child in children:
+                # Check if it's a round/date header
+                if 'matches-week-title' in child.get('class', []):
+                    round_elem = child.find('b')
+                    date_elem = child.find('span', class_='date')
+                    
+                    if round_elem:
+                        current_round = round_elem.text.strip()
+                    if date_elem:
+                        current_date = date_elem.text.strip()
+                
+                # Check if it's a match link
+                elif child.name == 'a' and 'ajax-match-item' in child.get('class', []):
+                    match_info = extract_match_info(child, current_date, current_round)
+                    if match_info:
+                        matches.append(match_info)
+                
+                # Check for nested matches wrapper (for live matches)
+                elif 'matches-wrapper' in child.get('class', []):
+                    nested_children = child.find_all(recursive=False)
+                    for nested_child in nested_children:
+                        if 'matches-week-title' in nested_child.get('class', []):
+                            round_elem = nested_child.find('b')
+                            date_elem = nested_child.find('span', class_='date')
+                            
+                            if round_elem:
+                                current_round = round_elem.text.strip()
+                            if date_elem:
+                                current_date = date_elem.text.strip()
+                        
+                        elif nested_child.name == 'a' and 'ajax-match-item' in nested_child.get('class', []):
+                            match_info = extract_match_info(nested_child, current_date, current_round)
+                            if match_info:
+                                matches.append(match_info)
+    
+    return matches
+
+def filter_matches_by_date(matches: List[Match], target_date: datetime) -> List[Match]:
+    """Filter matches starting from target_date (2 days ago) up to future"""
+    filtered = []
+    
+    for match in matches:
+        match_date = parse_arabic_date(match.date)
+        if match_date and match_date >= target_date:
+            filtered.append(match)
+        # Include matches without valid dates (might be live or recent)
+        elif not match_date and (match.status == "live" or match.status == "upcoming"):
+            filtered.append(match)
+    
+    return filtered
+
+@app.get("/", response_model=dict)
+async def root():
+    """API root endpoint"""
+    return {
+        "message": "Algerian Professional League Scraper API",
+        "version": "1.0.0",
+        "endpoints": {
+            "/matches": "Get all matches from 2 days ago to future (max 8)",
+            "/matches/all": "Get all available matches",
+            "/health": "Health check"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@app.get("/matches", response_model=MatchesResponse)
+async def get_matches():
+    """
+    Scrape matches from Algerian Professional League
+    Returns matches from 2 days ago up to future (maximum 8 matches)
+    """
+    try:
+        # Calculate target date (2 days ago)
+        today = datetime.now()
+        target_date = today - timedelta(days=2)
+        
+        # Fetch the page
+        url = "https://www.ysscores.com/ar/championship/57146/Algerian-Professional-League-1"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
+            'Connection': 'keep-alive',
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Scrape all matches
+        all_matches = scrape_matches(response.text)
+        
+        # Filter matches from 2 days ago onwards
+        filtered_matches = filter_matches_by_date(all_matches, target_date)
+        
+        # Sort matches: live first, then by date
+        def sort_key(match):
+            if match.status == "live":
+                return (0, datetime.min)  # Live matches first
+            match_date = parse_arabic_date(match.date)
+            return (1, match_date if match_date else datetime.max)
+        
+        filtered_matches.sort(key=sort_key)
+        
+        # Limit to 8 matches
+        limited_matches = filtered_matches[:8]
+        
+        return MatchesResponse(
+            total_matches=len(limited_matches),
+            matches=limited_matches,
+            scraped_at=datetime.now().isoformat(),
+            date_range=f"From {target_date.strftime('%Y-%m-%d')} onwards (max 8 matches)"
+        )
+    
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch data: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing data: {str(e)}")
+
+@app.get("/matches/all", response_model=MatchesResponse)
+async def get_all_matches():
+    """
+    Get all available matches without date filtering
+    """
+    try:
+        url = "https://www.ysscores.com/ar/championship/57146/Algerian-Professional-League-1"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
+            'Connection': 'keep-alive',
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Scrape all matches
+        all_matches = scrape_matches(response.text)
+        
+        # Sort matches: live first, then by date
+        def sort_key(match):
+            if match.status == "live":
+                return (0, datetime.min)
+            match_date = parse_arabic_date(match.date)
+            return (1, match_date if match_date else datetime.max)
+        
+        all_matches.sort(key=sort_key)
+        
+        return MatchesResponse(
+            total_matches=len(all_matches),
+            matches=all_matches,
+            scraped_at=datetime.now().isoformat(),
+            date_range="All available matches"
+        )
+    
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch data: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing data: {str(e)}")
+
+# ============================================================================
+# STATS ENDPOINT - Detailed Match Information
+# ============================================================================
 
 # --------------------------------------
 # معلومات حالة المباراة
@@ -167,7 +512,6 @@ def extract_match_events(soup, home_team_class="for-team-a", away_team_class="fo
         time_element = event_item.find('div', class_='time')
         event_data['time'] = time_element.get_text(strip=True).replace("'", '') if time_element else None
 
-        # Only add if we have essential data
         if event_data.get('time') or event_data.get('type'):
             unique_events.add(frozenset((k, v) for k, v in event_data.items() if v is not None))
 
@@ -251,22 +595,14 @@ def extract_match_stops(soup):
 # ------------------- معلومات اللقاء -------------------
 
 def adjust_match_time(time_str):
-    """
-    تحويل وقت المباراة من صيغة 12 ساعة إلى 24 ساعة مع إضافة 8 ساعات
-    مثال: "06:00 صباحاً" -> "14:00"
-    """
+    """تحويل وقت المباراة من صيغة 12 ساعة إلى 24 ساعة مع إضافة 8 ساعات"""
     try:
-        # إزالة المسافات الزائدة
         time_str = time_str.strip()
+        time_part = time_str.split()[0]
+        period = time_str.split()[1] if len(time_str.split()) > 1 else ""
         
-        # استخراج الوقت والفترة (صباحاً/مساءً)
-        time_part = time_str.split()[0]  # "06:00"
-        period = time_str.split()[1] if len(time_str.split()) > 1 else ""  # "صباحاً" أو "مساءً"
-        
-        # تقسيم الساعات والدقائق
         hours, minutes = map(int, time_part.split(":"))
         
-        # تحويل إلى صيغة 24 ساعة
         if "مساءً" in period or "مساء" in period:
             if hours != 12:
                 hours += 12
@@ -274,18 +610,14 @@ def adjust_match_time(time_str):
             if hours == 12:
                 hours = 0
         
-        # إضافة 8 ساعات
         hours += 8
         
-        # معالجة تجاوز 24 ساعة
         if hours >= 24:
             hours -= 24
         
-        # إرجاع الوقت بصيغة 24 ساعة
         return f"{hours:02d}:{minutes:02d}"
     
-    except Exception as e:
-        # في حالة فشل التحويل، إرجاع القيمة الأصلية
+    except Exception:
         return time_str
 
 def extract_meeting_info(soup):
@@ -304,7 +636,6 @@ def extract_meeting_info(soup):
                     title = title_div.get_text(strip=True)
                     content = content_div.get_text(strip=True)
                     
-                    # إذا كان الحقل هو "وقت المباراة"، أضف 8 ساعات وحوّل إلى صيغة 24 ساعة
                     if title == "وقت المباراة":
                         content = adjust_match_time(content)
                     
@@ -314,10 +645,8 @@ def extract_meeting_info(soup):
 
 # ------------------- استخراج معلومات المباراة -------------------
 
-from datetime import datetime, timedelta
-
-# دالة تنسيق الوقت: تضيف +8 ساعات وترجعه بصيغة 24h
 def format_match_time(raw_time):
+    """دالة تنسيق الوقت: تضيف +8 ساعات وترجعه بصيغة 24h"""
     try:
         dt = datetime.strptime(raw_time, "%Y-%m-%d %H:%M")
         dt += timedelta(hours=8)
@@ -325,7 +654,6 @@ def format_match_time(raw_time):
     except Exception:
         return raw_time
 
-# ------------------- استخراج معلومات المباراة -------------------
 def extract_info(soup, teams_info):
     info = teams_info.copy()
 
@@ -338,7 +666,7 @@ def extract_info(soup, teams_info):
     time_value = tag_time["value"] if tag_time and tag_time.has_attr("value") else None
 
     raw_time = compute_time_expr(status_value, time_value)
-    match_time = format_match_time(raw_time)
+    match_time = format_match_time(raw_time) if raw_time else None
 
     info.update({
         "Time": match_time,
@@ -395,7 +723,6 @@ def extract_info(soup, teams_info):
 
     return info
 
-
 # ------------------- الدمج والترتيب -------------------
 
 def build_match_info(html_content, teams_info):
@@ -443,7 +770,7 @@ def build_match_info(html_content, teams_info):
         "events": list(reversed(output))
     }
 
-# ------------------- Main API Function -------------------
+# ------------------- Main Stats Function -------------------
 
 def get_match_data(match_id: str):
     base_url = "https://www.ysscores.com"
@@ -457,12 +784,12 @@ def get_match_data(match_id: str):
         page_resp = requests.get(match_page_url, headers=headers, timeout=10)
         page_resp.raise_for_status()
     except Exception as e:
-        raise Exception(f"Failed to load match page: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load match page: {e}")
 
     soup_page = BeautifulSoup(page_resp.text, "html.parser")
     teams = soup_page.select(".team-item")
     if len(teams) < 2:
-        raise Exception("Could not find team info on match page")
+        raise HTTPException(status_code=404, detail="Could not find team info on match page")
 
     def get_team_data(el):
         name_el = el.find("h3")
@@ -486,32 +813,39 @@ def get_match_data(match_id: str):
         api_resp = requests.get(api_url, headers=headers, timeout=10)
         api_resp.raise_for_status()
     except Exception as e:
-        raise Exception(f"Failed to load match API: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load match API: {e}")
 
     # Step 3: Build full data
     try:
         return build_match_info(api_resp.text, teams_info)
     except Exception as e:
-        raise Exception(f"Failed to parse match data: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse match data: {e}")
 
-# ------------------- FastAPI Endpoint -------------------
+# ------------------- Stats API Endpoint -------------------
 
-from flask import Flask, jsonify, abort
-import requests
-from bs4 import BeautifulSoup
-# import all your helper functions from the FastAPI code above
-
-app = Flask(__name__)
-
-@app.route("/match/<match_id>", methods=["GET"])
-def get_match(match_id):
-    if not match_id.isdigit():
-        abort(400, description="Invalid match ID. Must be numeric.")
+@app.get("/stats/{match_id}")
+async def get_match_stats(match_id: str):
+    """
+    Get detailed match statistics, events, and information
+    
+    Parameters:
+    - match_id: The match ID from ysscores.com
+    
+    Example: /stats/4907637
+    """
     try:
-        data = get_match_data(match_id)  # same function you already wrote
-        return jsonify(data)
+        match_data = get_match_data(match_id)
+        return {
+            "success": True,
+            "match_id": match_id,
+            "data": match_data,
+            "scraped_at": datetime.now().isoformat()
+        }
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        abort(500, description=str(e))
+        raise HTTPException(status_code=500, detail=f"Error fetching match stats: {str(e)}")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
