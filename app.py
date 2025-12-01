@@ -846,6 +846,8 @@ async def get_match_stats(match_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching match stats: {str(e)}")
 
+import uvicorn
 if __name__ == "__main__":
-    import uvicorn
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
